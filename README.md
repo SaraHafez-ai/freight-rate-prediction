@@ -1,10 +1,38 @@
 # Freight Rate Prediction
 
-Machine learning solution for predicting freight load rates from historical shipment data.
+This repository contains my solution for the freight rate prediction assessment.
 
-The project uses time-based validation to compare multiple regression models, target formulations, feature sets, and XGBoost configurations before generating the final validation and December predictions.
+The goal was to train a regression model on historical freight data, validate it using a realistic time-based split, generate predictions for the provided validation set, and produce daily December predictions for the fixed Lexington → Fort Wayne route.
 
-## Project Structure
+## Final approach
+
+The final model uses:
+
+- **XGBoost**
+- **Rate-per-mile prediction**
+- **Expanding-window time validation**
+- **11 input features**
+- **Median imputation** for missing numeric values
+- **Most-frequent imputation + one-hot encoding** for categorical values
+- Basic data cleaning, including correcting invalid negative shipment weights
+
+Instead of predicting the total freight rate directly, the model predicts:
+
+```text
+rate_per_mile = posted_rate / distance
+```
+
+The final freight rate is then reconstructed as:
+
+```text
+predicted_rate = predicted_rate_per_mile × distance
+```
+
+This gave better temporal validation results than direct total-rate prediction.
+
+---
+
+## Project structure
 
 ```text
 freight-rate-prediction/
@@ -14,6 +42,14 @@ freight-rate-prediction/
 │   ├── validation.csv
 │   ├── validation_predictions_template.csv
 │   └── december_chart_inputs.csv
+│
+├── report/
+│   └── Freight_Rate_Prediction_Final_Report.pdf
+│
+├── results/
+│   └── rate_per_mile/
+│       ├── backward_ablation.csv
+│       └── feature_ablation.csv
 │
 ├── scorer_results/
 │   └── candidate_december.png
@@ -30,11 +66,11 @@ freight-rate-prediction/
 │   ├── 09_december_model.py
 │   │
 │   └── experiments/
-│       ├── target_experiment.py
-│       ├── feature_ablation.py
 │       ├── backward_ablation.py
+│       ├── december_target_test.py
+│       ├── feature_ablation.py
 │       ├── seed_robustness.py
-│       └── december_target_test.py
+│       └── target_experiment.py
 │
 ├── validation_predictions.csv
 ├── score.py
@@ -43,63 +79,96 @@ freight-rate-prediction/
 └── .gitignore
 ```
 
-## Validation Strategy
+---
 
-Because the goal is to predict future freight rates, random train/test splitting was avoided.
+## Validation strategy
 
-An expanding-window time-based validation strategy was used:
+Because the task is to predict future freight rates, I used a **time-based expanding-window split** instead of a random train/test split.
 
-- Train on data before August → validate on August
-- Train on data before September → validate on September
-- Train on data before October → validate on October
+The validation folds were:
 
-This better represents how the model would perform on future shipments.
+| Fold | Training data | Validation data |
+|---|---|---|
+| August | Before Aug 1, 2025 | August 2025 |
+| September | Before Sep 1, 2025 | September 2025 |
+| October | Before Oct 1, 2025 | October 2025 |
 
-## Model Selection
+This setup better reflects how the model would behave in production, where future loads must be predicted using only historical information.
 
-The following models were compared:
+---
+
+## Model comparison
+
+I compared several regression approaches, including:
 
 - XGBoost
 - CatBoost
 - LightGBM
 - ExtraTrees
 
-Both direct total-rate prediction and rate-per-mile prediction were tested.
+I also compared two target strategies:
 
-The strongest approach was:
+- direct total-rate prediction
+- rate-per-mile prediction
 
-- Model: XGBoost
-- Target: Rate per mile
-- Final prediction: predicted rate per mile × shipment distance
+Among the tested configurations, **XGBoost with a rate-per-mile target** produced the strongest validation performance and was selected for the final model.
 
-Using rate per mile reduced the effect of distance scaling and produced better walk-forward validation results than directly predicting the total posted rate.
+---
 
-## Final Features
+## Final features
 
-The final validation model uses 11 features:
+The final validation model uses the following 11 features.
 
 ### Categorical
 
-- pickup
-- delivery
-- route
-- equipment
+- `pickup`
+- `delivery`
+- `route`
+- `equipment`
 
 ### Numeric
 
-- distance
-- weight
-- pickup_lat
-- pickup_lon
-- delivery_lat
-- delivery_lon
-- day_of_week
+- `distance`
+- `weight`
+- `pickup_lat`
+- `pickup_lon`
+- `delivery_lat`
+- `delivery_lon`
+- `day_of_week`
 
-The `route` feature is created by combining the pickup and delivery locations.
+The `route` feature is created as:
 
-The feature set was selected using feature ablation, backward ablation, and random-seed robustness testing.
+```text
+pickup + " -> " + delivery
+```
 
-## Final XGBoost Configuration
+Feature selection was supported by feature ablation, backward elimination, and seed-robustness checks.
+
+---
+
+## Data preparation
+
+The preprocessing pipeline includes:
+
+- date parsing
+- route creation
+- day-of-week extraction
+- correction of invalid negative weight values
+- median imputation for numeric missing values
+- most-frequent imputation for categorical missing values
+- one-hot encoding for categorical features
+
+Unknown categories are handled using:
+
+```python
+OneHotEncoder(handle_unknown="ignore")
+```
+
+This allows the model to process locations that were not present in the training data.
+
+---
+
+## Final XGBoost configuration
 
 ```text
 n_estimators       = 1000
@@ -111,36 +180,29 @@ min_child_weight   = 1
 reg_alpha          = 0.0
 reg_lambda         = 1.0
 objective          = reg:absoluteerror
+eval_metric        = mae
+tree_method        = hist
+random_state       = 42
 ```
 
-## Validation Performance
+---
+
+## Validation results
 
 Final walk-forward MAE:
 
-| Validation Month | MAE |
+| Validation month | MAE |
 |---|---:|
-| August | $91.82 |
-| September | $95.58 |
-| October | $99.51 |
-| **Average** | **$95.63** |
+| August | $91.72 |
+| September | $95.45 |
+| October | $99.32 |
+| **Average** | **$95.50** |
 
 MAE represents the average absolute difference between the predicted freight rate and the actual freight rate.
 
-## Preprocessing
+---
 
-Numeric missing values are filled using median imputation.
-
-Categorical missing values are filled using the most frequent category and then transformed using one-hot encoding.
-
-Unknown categories in future data are handled using:
-
-```python
-OneHotEncoder(handle_unknown="ignore")
-```
-
-This allows the pipeline to process locations that were not present in the historical training data.
-
-## Generate Validation Predictions
+## Generate validation predictions
 
 Run:
 
@@ -148,13 +210,13 @@ Run:
 python src/08_generate_validation_predictions.py
 ```
 
-This trains the final model on all labeled historical data and creates:
+This trains the final model on all labeled historical rows and creates:
 
 ```text
 validation_predictions.csv
 ```
 
-The file contains:
+The file contains exactly:
 
 ```text
 load_id,predicted_rate
@@ -162,7 +224,39 @@ load_id,predicted_rate
 
 for all 12,000 validation loads.
 
-## Generate December Predictions
+---
+
+## December prediction model
+
+The December file does not contain all of the features available in the main validation set, so a separate compatible model is trained using only fields available in both historical and December data.
+
+The December-compatible feature set includes:
+
+### Categorical
+
+- `pickup`
+- `delivery`
+- `route`
+- `equipment`
+
+### Numeric
+
+- `distance`
+- `weight`
+- `month`
+- `day_of_week`
+- `day_of_year`
+
+The December model also uses the rate-per-mile target.
+
+Its walk-forward validation result was:
+
+| Month | MAE |
+|---|---:|
+| August | $86.32 |
+| September | $102.68 |
+| October | $114.08 |
+| **Average** | **$101.02** |
 
 Run:
 
@@ -170,23 +264,15 @@ Run:
 python src/09_december_model.py
 ```
 
-The December input contains fewer available features, so a separate December-compatible model is trained.
-
-The December model also uses a rate-per-mile target.
-
-Its walk-forward average MAE was approximately:
-
-```text
-$101.35
-```
-
-The script fills the `predicted_rate` column in:
+This fills the `predicted_rate` column in:
 
 ```text
 data/december_chart_inputs.csv
 ```
 
-## Run the Official Scorer
+---
+
+## Official scorer
 
 After generating both prediction files, run:
 
@@ -194,21 +280,22 @@ After generating both prediction files, run:
 python score.py --predictions validation_predictions.csv --december-predictions data/december_chart_inputs.csv
 ```
 
-A successful run should report:
+The scorer validates:
 
-```text
-Validated 12,000 final predictions.
-Validated 31 fixed December predictions.
-Created chart: scorer_results/candidate_december.png
-```
+- all 12,000 validation predictions
+- all 31 December predictions
+- required file structure and columns
+- positive prediction values
 
-The scorer also generates:
+It also creates:
 
 ```text
 scorer_results/candidate_december.png
 ```
 
-Final validation metrics for the hidden validation set are calculated after submission.
+Final hidden validation metrics are calculated separately after submission.
+
+---
 
 ## Installation
 
@@ -218,9 +305,11 @@ Create and activate a virtual environment, then install the dependencies:
 python -m pip install -r requirements.txt
 ```
 
-## Reproduce Final Outputs
+---
 
-The main final workflow is:
+## Reproduce the final submission
+
+Run the following from the project root:
 
 ```bash
 python src/08_generate_validation_predictions.py
@@ -228,14 +317,26 @@ python src/09_december_model.py
 python score.py --predictions validation_predictions.csv --december-predictions data/december_chart_inputs.csv
 ```
 
-## Additional Experiments
+---
 
-The `src/experiments/` directory contains supporting experiments used during model development, including:
+## Supporting experiments
+
+The `src/experiments/` folder contains the experiments used during model development, including:
 
 - direct rate vs rate-per-mile prediction
-- feature-group ablation
+- feature ablation
 - backward feature elimination
-- random-seed robustness testing
+- seed robustness
 - December target comparison
 
-These experiments were used for model selection but are not required to generate the final submission files.
+These scripts were used to support model-selection decisions but are not required to generate the final submission files.
+
+---
+
+## Report
+
+The full assessment report is available here:
+
+```text
+report/Freight_Rate_Prediction_Final_Report.pdf
+```
